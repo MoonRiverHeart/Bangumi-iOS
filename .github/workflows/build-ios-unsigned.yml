@@ -64,8 +64,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${BANGUMI_APP_ID}" ] || [ -z "${BANGUMI_APP_SECRET}" ]; then
-            echo "BANGUMI_APP_ID or BANGUMI_APP_SECRET is not set." >&2
-            exit 1
+            echo "BANGUMI secrets not set, skipping Config.xcconfig generation."
+            exit 0
           fi
           cat > App/Config.xcconfig <<EOF
           BANGUMI_APP_ID = ${BANGUMI_APP_ID}
