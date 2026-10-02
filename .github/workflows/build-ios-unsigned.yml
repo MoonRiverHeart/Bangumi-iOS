@@ -1,0 +1,118 @@
+name: Build iOS (Unsigned)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      marketing_version: ${{ steps.version.outputs.marketing }}
+      build_number: ${{ steps.version.outputs.build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Read versions
+        id: version
+        run: |
+          set -euo pipefail
+          FILE="Bangumi.xcodeproj/project.pbxproj"
+          if [ ! -f "$FILE" ]; then
+            echo "project.pbxproj not found at $FILE" >&2
+            exit 1
+          fi
+
+          MARKETING=$(awk 'match($0,/MARKETING_VERSION = ([^;]+);/,a){gsub(/"/,"",a[1]); print a[1]; exit}' "$FILE")
+          BUILD=$(awk 'match($0,/CURRENT_PROJECT_VERSION = ([^;]+);/,a){gsub(/"/,"",a[1]); print a[1]; exit}' "$FILE")
+
+          if [ -z "$MARKETING" ]; then
+            echo "MARKETING_VERSION not found in $FILE" >&2
+            exit 1
+          fi
+          if [ -z "$BUILD" ]; then
+            echo "CURRENT_PROJECT_VERSION not found in $FILE" >&2
+            exit 1
+          fi
+
+          echo "Detected MARKETING_VERSION: $MARKETING"
+          echo "Detected CURRENT_PROJECT_VERSION: $BUILD"
+          {
+            echo "marketing=$MARKETING"
+            echo "build=$BUILD"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    runs-on: xcode-27
+    needs: detect
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Prepare app config
+        env:
+          BANGUMI_APP_ID: ${{ secrets.BANGUMI_APP_ID }}
+          BANGUMI_APP_SECRET: ${{ secrets.BANGUMI_APP_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BANGUMI_APP_ID}" ] || [ -z "${BANGUMI_APP_SECRET}" ]; then
+            echo "BANGUMI_APP_ID or BANGUMI_APP_SECRET is not set." >&2
+            exit 1
+          fi
+          cat > App/Config.xcconfig <<EOF
+          BANGUMI_APP_ID = ${BANGUMI_APP_ID}
+          BANGUMI_APP_SECRET = ${BANGUMI_APP_SECRET}
+          EOF
+
+      - name: Build archive (no signing)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Bangumi.xcodeproj \
+            -scheme Bangumi \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Bangumi.xcarchive" \
+            archive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          ARCHIVE="$RUNNER_TEMP/Bangumi.xcarchive"
+          APP_PATH="$ARCHIVE/Products/Applications/Bangumi.app"
+          PAYLOAD_DIR="$RUNNER_TEMP/Payload"
+          IPA_PATH="$RUNNER_TEMP/Bangumi-unsigned.ipa"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "App not found at $APP_PATH" >&2
+            exit 1
+          fi
+
+          mkdir -p "$PAYLOAD_DIR"
+          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
+          rm -rf "$PAYLOAD_DIR/Bangumi.app/_CodeSignature" || true
+
+          cd "$RUNNER_TEMP"
+          zip -qry "$IPA_PATH" Payload
+          echo "IPA created at $IPA_PATH"
+          ls -lh "$IPA_PATH"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bangumi-unsigned-ipa-${{ needs.detect.outputs.marketing_version }}.${{ needs.detect.outputs.build_number }}
+          path: ${{ runner.temp }}/Bangumi-unsigned.ipa
+          retention-days: 30
